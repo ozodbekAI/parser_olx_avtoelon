@@ -1,193 +1,129 @@
-import asyncpg
+import aiosqlite
 import logging
 from typing import List, Dict, Optional
-import json
+from config import Config
 
 logger = logging.getLogger(__name__)
 
+
 class Database:
-    def __init__(self, connection_string: str):
-        self.connection_string = connection_string
-        self.pool: Optional[asyncpg.Pool] = None
     
-    async def connect(self):
-        """Database bilan ulanish"""
-        self.pool = await asyncpg.create_pool(
-            self.connection_string,
-            min_size=1,
-            max_size=10
-        )
-        await self.create_tables()
-        logger.info("Database ulanishi o'rnatildi")
+    def __init__(self):
+        self.db_name = Config.DB_NAME
     
-    async def disconnect(self):
-        """Database ulanishini yopish"""
-        if self.pool:
-            await self.pool.close()
-            logger.info("Database ulanishi yopildi")
+    def get_connection(self):
+        return aiosqlite.connect(self.db_name)
     
     async def create_tables(self):
-        """Kerakli jadvallarni yaratish"""
-        async with self.pool.acquire() as conn:
-            # Parsers jadvali
-            await conn.execute('''
+        async with self.get_connection() as db:
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS parsers (
-                    id SERIAL PRIMARY KEY,
-                    channel_id VARCHAR(255) NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    admin_id INTEGER NOT NULL,
                     url TEXT NOT NULL,
-                    site_type VARCHAR(50) DEFAULT 'olx',
+                    channel_id TEXT NOT NULL,
+                    site_type TEXT DEFAULT 'olx',
                     filter_text TEXT,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    last_known_href TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'active'
                 )
-            ''')
+            """)
             
-            # Parsed ads jadvali
-            await conn.execute('''
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS parsed_ads (
-                    id SERIAL PRIMARY KEY,
-                    parser_id INTEGER REFERENCES parsers(id) ON DELETE CASCADE,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parser_id INTEGER NOT NULL,
                     href TEXT NOT NULL,
                     parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (parser_id) REFERENCES parsers (id),
                     UNIQUE(parser_id, href)
                 )
-            ''')
+            """)
             
-            # Parser hrefs jadvali - oxirgi ko'rilgan hreflarni saqlash uchun
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS parser_hrefs (
-                    id SERIAL PRIMARY KEY,
-                    parser_id INTEGER REFERENCES parsers(id) ON DELETE CASCADE,
-                    hrefs JSONB NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # parser_id uchun unique constraint
-            await conn.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_parser_hrefs_parser_id 
-                ON parser_hrefs(parser_id)
-            ''')
-            
-            logger.info("Barcha jadvallar yaratildi")
+            await db.commit()
+            logger.info("Database jadvallar yaratildi")
     
-    # Parser metodlari
-    async def add_parser(self, channel_id: str, url: str, site_type: str = 'olx', 
-                        filter_text: Optional[str] = None) -> int:
-        """Yangi parser qo'shish"""
-        async with self.pool.acquire() as conn:
-            parser_id = await conn.fetchval(
-                '''INSERT INTO parsers (channel_id, url, site_type, filter_text)
-                   VALUES ($1, $2, $3, $4) RETURNING id''',
-                channel_id, url, site_type, filter_text
+    async def add_parser(self, admin_id: int, url: str, channel_id: str, site_type: str = 'olx', filter_text: Optional[str] = None) -> int:
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                "INSERT INTO parsers (admin_id, url, channel_id, site_type, filter_text) VALUES (?, ?, ?, ?, ?)",
+                (admin_id, url, channel_id, site_type, filter_text)
             )
-            logger.info(f"Yangi parser qo'shildi: {parser_id}")
-            return parser_id
+            await db.commit()
+            return cursor.lastrowid
+    
+    async def get_user_parsers(self, admin_id: int) -> List[Dict]:
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM parsers WHERE admin_id = ? AND status = 'active'",
+                (admin_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
     
     async def get_all_active_parsers(self) -> List[Dict]:
-        """Barcha faol parserlarni olish"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                'SELECT * FROM parsers WHERE is_active = TRUE'
-            )
-            return [dict(row) for row in rows]
-    
-    async def get_parser_by_channel(self, channel_id: str) -> Optional[Dict]:
-        """Channel bo'yicha parserni olish"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                'SELECT * FROM parsers WHERE channel_id = $1 AND is_active = TRUE',
-                channel_id
-            )
-            return dict(row) if row else None
+        async with self.get_connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM parsers WHERE status = 'active'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
     
     async def delete_parser(self, parser_id: int) -> bool:
-        """Parserni o'chirish"""
-        async with self.pool.acquire() as conn:
-            result = await conn.execute(
-                'UPDATE parsers SET is_active = FALSE WHERE id = $1',
-                parser_id
+        async with self.get_connection() as db:
+            await db.execute(
+                "UPDATE parsers SET status = 'deleted' WHERE id = ?",
+                (parser_id,)
             )
-            return result == 'UPDATE 1'
+            await db.commit()
+            return True
     
-    # Href saqlash metodlari - YANGILANGAN
-    async def save_last_known_hrefs(self, parser_id: int, hrefs: List[str]):
-        """Oxirgi ko'rilgan hreflarni saqlash (10 tagacha)"""
-        async with self.pool.acquire() as conn:
-            # Faqat 10 ta eng yangi hrefni saqlash
-            hrefs_to_save = hrefs[:10]
-            hrefs_json = json.dumps(hrefs_to_save)
-            
-            await conn.execute('''
-                INSERT INTO parser_hrefs (parser_id, hrefs, updated_at)
-                VALUES ($1, $2, CURRENT_TIMESTAMP)
-                ON CONFLICT (parser_id) 
-                DO UPDATE SET hrefs = $2, updated_at = CURRENT_TIMESTAMP
-            ''', parser_id, hrefs_json)
-            
-            logger.info(f"Parser {parser_id}: {len(hrefs_to_save)} ta href saqlab qo'yildi")
-    
-    async def get_last_known_hrefs(self, parser_id: int, limit: int = 10) -> List[str]:
-        """Oxirgi saqlab qo'yilgan hreflarni olish"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                'SELECT hrefs FROM parser_hrefs WHERE parser_id = $1',
-                parser_id
-            )
-            
-            if row and row['hrefs']:
-                hrefs = json.loads(row['hrefs'])
-                return hrefs[:limit]
-            return []
-    
-    # Eski metodlar - backward compatibility uchun
-    async def get_last_known_href(self, parser_id: int) -> Optional[str]:
-        """Oxirgi bitta hrefni olish (eski versiya bilan moslik uchun)"""
-        hrefs = await self.get_last_known_hrefs(parser_id, limit=1)
-        return hrefs[0] if hrefs else None
-    
-    async def set_last_known_href(self, parser_id: int, href: str):
-        """Bitta hrefni saqlash (eski versiya bilan moslik uchun)"""
-        await self.save_last_known_hrefs(parser_id, [href])
-    
-    # Parsed ads metodlari
-    async def add_parsed_ad(self, parser_id: int, href: str):
-        """Yangi parse qilingan elonni qo'shish"""
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.execute(
-                    '''INSERT INTO parsed_ads (parser_id, href)
-                       VALUES ($1, $2)
-                       ON CONFLICT (parser_id, href) DO NOTHING''',
-                    parser_id, href
+    async def add_parsed_ad(self, parser_id: int, href: str) -> bool:
+        try:
+            async with self.get_connection() as db:
+                await db.execute(
+                    "INSERT INTO parsed_ads (parser_id, href) VALUES (?, ?)",
+                    (parser_id, href)
                 )
-            except Exception as e:
-                logger.error(f"Parsed ad qo'shishda xato: {e}")
+                await db.commit()
+                return True
+        except aiosqlite.IntegrityError:
+            return False
+    
+    async def get_parsed_ads(self, parser_id: int, limit: int = 50) -> List[str]:
+        async with self.get_connection() as db:
+            async with db.execute(
+                "SELECT href FROM parsed_ads WHERE parser_id = ? ORDER BY parsed_at DESC LIMIT ?",
+                (parser_id, limit)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
     
     async def is_ad_parsed(self, parser_id: int, href: str) -> bool:
-        """Elon ilgari parse qilinganmi tekshirish"""
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
-                'SELECT EXISTS(SELECT 1 FROM parsed_ads WHERE parser_id = $1 AND href = $2)',
-                parser_id, href
-            )
-            return result
+        async with self.get_connection() as db:
+            async with db.execute(
+                "SELECT 1 FROM parsed_ads WHERE parser_id = ? AND href = ?",
+                (parser_id, href)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row is not None
     
-    async def get_parsed_ads_count(self, parser_id: int) -> int:
-        """Parser uchun parse qilingan elonlar sonini olish"""
-        async with self.pool.acquire() as conn:
-            count = await conn.fetchval(
-                'SELECT COUNT(*) FROM parsed_ads WHERE parser_id = $1',
-                parser_id
-            )
-            return count
+    async def get_last_known_href(self, parser_id: int) -> Optional[str]:
+        async with self.get_connection() as db:
+            async with db.execute(
+                "SELECT last_known_href FROM parsers WHERE id = ?",
+                (parser_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
     
-    async def cleanup_old_ads(self, days: int = 30):
-        """Eski elonlarni tozalash"""
-        async with self.pool.acquire() as conn:
-            result = await conn.execute(
-                '''DELETE FROM parsed_ads 
-                   WHERE parsed_at < CURRENT_TIMESTAMP - INTERVAL '%s days' ''',
-                days
+    async def set_last_known_href(self, parser_id: int, href: str):
+        async with self.get_connection() as db:
+            await db.execute(
+                "UPDATE parsers SET last_known_href = ? WHERE id = ?",
+                (href, parser_id)
             )
-            logger.info(f"Eski elonlar tozalandi: {result}")
+            await db.commit()

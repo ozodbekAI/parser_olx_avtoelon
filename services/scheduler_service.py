@@ -26,6 +26,7 @@ class SchedulerService:
             except Exception as e:
                 logger.error(f"Scheduler xatosi: {e}")
            
+            # 3 minut kutish
             await asyncio.sleep(Config.CHECK_INTERVAL)
    
     async def check_all_parsers(self):
@@ -36,7 +37,22 @@ class SchedulerService:
                 await self.check_parser(parser)
                 await asyncio.sleep(2)
             except Exception as e:
-                logger.error(f"Parser {parser['id']} xatosi: {e}")
+                logger.error(f"Parser {parser.get('id')} xatosi: {e}")
+   
+    async def find_last_seen_ad(self, parser_id: int, hrefs: List[str], check_limit: int = 10) -> Optional[int]:
+        """
+        Berilgan hrefs ro'yxatida avval yuborilgan elonni topadi.
+        Topilgan elonning indeksini qaytaradi, yoki None.
+        """
+        check_hrefs = hrefs[:min(check_limit, len(hrefs))]
+        
+        for i, href in enumerate(check_hrefs):
+            is_parsed = await self.db.is_ad_parsed(parser_id, href)
+            if is_parsed:
+                logger.info(f"Parser {parser_id}: Avval yuborilgan elon topildi index {i}: {href}")
+                return i
+        
+        return None
    
     async def check_parser(self, parser: dict):
         parser_id = parser['id']
@@ -45,90 +61,93 @@ class SchedulerService:
         site_type = parser['site_type']
         filter_text = parser['filter_text']
        
-        # Joriy elonlarni olish
         current_hrefs = await self.parser_service.get_listings(url, site_type, filter_text)
        
         if not current_hrefs:
             logger.info(f"Parser {parser_id}: Hech qanday elon topilmadi.")
             return
         
-        logger.info(f"Parser {parser_id}: Joriy elonlar soni: {len(current_hrefs)}")
+        logger.info(f"Parser {parser_id}: Joriy hrefs soni: {len(current_hrefs)}")
        
-        # Oxirgi saqlab qo'yilgan 10 ta hrefni olish
-        last_known_hrefs = await self.db.get_last_known_hrefs(parser_id, limit=10)
-        logger.info(f"Parser {parser_id}: Saqlab qo'yilgan hrefs soni: {len(last_known_hrefs)}")
+        last_known_href = await self.db.get_last_known_href(parser_id)
+        logger.info(f"Parser {parser_id}: Bookmark: {last_known_href}")
        
-        # Birinchi ishga tushirish
-        if not last_known_hrefs:
-            logger.info(f"Parser {parser_id}: Birinchi ishga tushirish - faqat eng yangi elon yuboriladi")
-            
-            # Faqat eng yangi elonni yuborish
+        # Birinchi ish: faqat eng yangi elonni yuborish
+        if last_known_href is None:
             if current_hrefs:
-                new_href = current_hrefs[0]
-                
-                try:
-                    details = await self.parser_service.get_ad_details(new_href, site_type)
-                    
-                    if details:
-                        await self.send_to_channel(channel_id, details, site_type)
-                        await self.db.add_parsed_ad(parser_id, new_href)
-                        logger.info(f"✅ Birinchi elon yuborildi: {new_href}")
-                        await asyncio.sleep(3)
-                    else:
-                        logger.warning(f"E'lon tafsilotlari olinmadi: {new_href}")
-                        
-                except Exception as e:
-                    logger.error(f"Birinchi elonni yuborishda xato {new_href}: {e}")
-                
-                # Oxirgi 10 ta hrefni saqlash
-                hrefs_to_save = current_hrefs[:10]
-                await self.db.save_last_known_hrefs(parser_id, hrefs_to_save)
-                logger.info(f"Saqlab qo'yildi: {len(hrefs_to_save)} ta href")
+                bookmark_href = current_hrefs[0]
+                await self.db.set_last_known_href(parser_id, bookmark_href)
+                logger.info(f"Birinchi ish: Bookmark o'rnatildi - {bookmark_href}")
+               
+                new_hrefs = [current_hrefs[0]]
+               
+                for href in new_hrefs:
+                    try:
+                        logger.info(f"E'lon yuklanmoqda (birinchi ish): {href}")
+                        details = await self.parser_service.get_ad_details(href, site_type)
+                       
+                        if details:
+                            await self.send_to_channel(channel_id, details, site_type)
+                            await self.db.add_parsed_ad(parser_id, href)
+                            logger.info(f"✅ Yuborildi (birinchi ish): {href}")
+                            await asyncio.sleep(3)
+                        else:
+                            logger.warning(f"E'lon tafsilotlari olinmadi: {href}")
+                           
+                    except Exception as e:
+                        logger.error(f"E'lon yuborishda xato {href}: {e}")
+                        continue
                
             return
        
-        # Yangi elonlarni topish
+        # Bookmark ni topishga urinish
         new_hrefs = []
-        found_any_known = False
+        bookmark_index = None
         
-        for href in current_hrefs:
-            # Agar bu href oldin ko'rilgan bo'lsa, to'xtash
-            if href in last_known_hrefs:
-                found_any_known = True
-                logger.info(f"Ma'lum href topildi: {href}")
+        for i, href in enumerate(current_hrefs):
+            if href == last_known_href:
+                bookmark_index = i
+                logger.info(f"Bookmark topildi index {i}: {href}")
                 break
             new_hrefs.append(href)
             
-            # Xavfsizlik: juda ko'p yangi elon bo'lmasin
+            # Xavfsizlik: juda ko'p elon bo'lsa to'xtatish
             if len(new_hrefs) >= 50:
-                logger.warning(f"Parser {parser_id}: 50 tadan ortiq yangi elon topildi, to'xtatilmoqda")
+                logger.warning(f"Parser {parser_id}: 50 ta yangi elonga yetdik, to'xtatamiz")
                 break
        
-        # Agar hech qanday ma'lum href topilmasa (masalan, hammasi o'chirilgan)
-        if not found_any_known and len(current_hrefs) > 0:
-            logger.warning(f"Parser {parser_id}: Hech qanday ma'lum href topilmadi! Ehtimol barcha eski elonlar o'chirilgan.")
-            logger.warning(f"Xavfsizlik uchun faqat 5 ta eng yangi elonni yuborish")
-            new_hrefs = current_hrefs[:5]  # Faqat 5 ta eng yangi
-       
-        logger.info(f"Parser {parser_id}: Yangi elonlar soni: {len(new_hrefs)}")
-       
+        # Agar bookmark topilmasa
+        if bookmark_index is None:
+            logger.warning(f"Parser {parser_id}: Bookmark topilmadi! Avval yuborilgan elonni qidiramiz...")
+            
+            # Eng yangi 10 ta elondan avval yuborilganini topish
+            last_seen_index = await self.find_last_seen_ad(parser_id, current_hrefs, check_limit=10)
+            
+            if last_seen_index is not None:
+                # Topildi! Faqat shu elondan yuqoridagilarni yuborish
+                new_hrefs = current_hrefs[:last_seen_index]
+                logger.info(f"Parser {parser_id}: Avval yuborilgan elon index {last_seen_index}da topildi. Yangi elonlar: {len(new_hrefs)} ta")
+            else:
+                # Hech narsa topilmadi - ehtiyot chorasi: faqat eng yangi 3 ta elonni yuborish
+                max_safe_count = 3
+                new_hrefs = current_hrefs[:max_safe_count]
+                logger.warning(f"Parser {parser_id}: Hech qanday avval yuborilgan elon topilmadi. Xavfsizlik uchun faqat {max_safe_count} ta eng yangi elonni yuboramiz")
+        
         if not new_hrefs:
-            logger.info(f"Parser {parser_id}: Yangi elon yo'q")
+            logger.info(f"Parser {parser_id}: Yangi elon yo'q.")
             return
+       
+        logger.info(f"Parser {parser_id}: {len(new_hrefs)} ta yangi elon topildi")
        
         # Yangi elonlarni yuborish (eng yangi birinchi)
         sent_count = 0
-        successfully_sent = []
-        
         for href in new_hrefs:
             try:
-                logger.info(f"E'lon yuklanmoqda: {href}")
                 details = await self.parser_service.get_ad_details(href, site_type)
                
                 if details:
                     await self.send_to_channel(channel_id, details, site_type)
                     await self.db.add_parsed_ad(parser_id, href)
-                    successfully_sent.append(href)
                     sent_count += 1
                     logger.info(f"✅ Yuborildi ({sent_count}/{len(new_hrefs)}): {href}")
                     await asyncio.sleep(3)
@@ -139,12 +158,11 @@ class SchedulerService:
                 logger.error(f"E'lon yuborishda xato {href}: {e}")
                 continue
        
-        # Oxirgi 10 ta hrefni yangilash
-        # Yangi yuborilgan + eski saqlab qo'yilganlarni birlashtirish
-        updated_hrefs = current_hrefs[:10]  # Eng yangi 10 ta
-        await self.db.save_last_known_hrefs(parser_id, updated_hrefs)
-        logger.info(f"Parser {parser_id}: Yangilangan hrefs saqlab qo'yildi: {len(updated_hrefs)} ta")
-       
+        # Bookmark ni yangilash: eng yangi elonga
+        if current_hrefs:
+            new_bookmark = current_hrefs[0]
+            await self.db.set_last_known_href(parser_id, new_bookmark)
+            logger.info(f"Bookmark yangilandi: {new_bookmark}")
    
     async def send_to_channel(self, channel_id: str, details: Dict, site_type: str = 'olx'):
         try:
@@ -195,7 +213,6 @@ class SchedulerService:
            
         except Exception as e:
             logger.error(f"Channelga yuborishda xato: {e}")
-            raise
    
     def stop(self):
         self.is_running = False
