@@ -108,6 +108,23 @@ class ParserService:
                     
                     for item in items:
                         try:
+                            button = item.find('button', class_='list-link js__advert-button')
+                            if not button:
+                                continue
+                            
+                            payment_corner = button.find('div', class_='payment-package-corner')
+                            if payment_corner:
+                                badge = payment_corner.find('span', class_=re.compile(r'payment-package-corner__badge--'))
+                                if badge:
+                                    badge_classes = badge.get('class', [])
+                                    promo_badges = [
+                                        'payment-package-corner__badge--vip-sale',
+                                        'payment-package-corner__badge--zor-sale',
+                                        'payment-package-corner__badge--alo-sale'
+                                    ]
+                                    if any(promo_class in badge_classes for promo_class in promo_badges):
+                                        continue
+                            
                             title_a = item.find('a', class_='js__advert-link')
                             if title_a:
                                 title_text = title_a.get_text(strip=True).lower()
