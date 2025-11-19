@@ -26,7 +26,6 @@ class SchedulerService:
             except Exception as e:
                 logger.error(f"Scheduler xatosi: {e}")
            
-            # 3 minut kutish
             await asyncio.sleep(Config.CHECK_INTERVAL)
    
     async def check_all_parsers(self):
@@ -40,10 +39,6 @@ class SchedulerService:
                 logger.error(f"Parser {parser.get('id')} xatosi: {e}")
    
     async def find_last_seen_ad(self, parser_id: int, hrefs: List[str], check_limit: int = 10) -> Optional[int]:
-        """
-        Berilgan hrefs ro'yxatida avval yuborilgan elonni topadi.
-        Topilgan elonning indeksini qaytaradi, yoki None.
-        """
         check_hrefs = hrefs[:min(check_limit, len(hrefs))]
         
         for i, href in enumerate(check_hrefs):
@@ -54,7 +49,7 @@ class SchedulerService:
         
         return None
    
-     async def check_parser(self, parser: dict):
+    async def check_parser(self, parser: dict):
         parser_id = parser['id']
         url = parser['url']
         channel_id = parser['channel_id']
@@ -69,25 +64,20 @@ class SchedulerService:
 
         logger.info(f"Parser {parser_id}: Joriy hreflar soni: {len(current_hrefs)}")
 
-        # Istalgan holatda DB dagi bookmark faqat diagnostika uchun
         last_known_href = await self.db.get_last_known_href(parser_id)
         logger.info(f"Parser {parser_id}: Bookmark (diagnostika): {last_known_href}")
 
         new_hrefs: List[str] = []
 
-        # Xavfsizlik limitlari
-        MAX_NEW = 50              # Bir siklda yuboriladigan maksimal yangi e'lon
-        MAX_CONSEC_OLD = 5        # Ketma-ket eski (parsed) e'lonlar soni – shundan keyin siklni to'xtatamiz
+        MAX_NEW = 50              
+        MAX_CONSEC_OLD = 5     
         consec_old = 0
 
-        # Agar bu parser uchun birinchi marotaba ishlayotgan bo'lsak – juda ehtiyot bo'lamiz
-        # (bookmark yo'q bo'lsa ham, DBda parsed yozuvlar bo'lishi mumkin, shuning uchun baribir is_ad_parsed tekshiramiz)
         for href in current_hrefs:
             try:
                 is_parsed = await self.db.is_ad_parsed(parser_id, href)
             except Exception as e:
                 logger.error(f"Parser {parser_id}: is_ad_parsed tekshirayotganda xato ({href}): {e}")
-                # Xatolik bo'lsa ham siklni davom ettiramiz
                 is_parsed = False
 
             if is_parsed:
@@ -101,7 +91,6 @@ class SchedulerService:
                     break
                 continue
 
-            # Yangi e'lon
             consec_old = 0
             new_hrefs.append(href)
             logger.info(f"Parser {parser_id}: Yangi e'lon topildi: {href}")
@@ -115,7 +104,6 @@ class SchedulerService:
 
         if not new_hrefs:
             logger.info(f"Parser {parser_id}: Yangi e'lon topilmadi.")
-            # Baribir bookmarkni yangilab qo'yamiz (eng yuqoridagi e'lon)
             try:
                 if current_hrefs:
                     await self.db.set_last_known_href(parser_id, current_hrefs[0])
@@ -127,7 +115,6 @@ class SchedulerService:
 
         sent_count = 0
 
-        # Eng yangi birinchi bo'lib kelgan – shuni xohlasangiz teskari tartibda ham yuborishingiz mumkin
         for href in new_hrefs:
             try:
                 details = await self.parser_service.get_ad_details(href, site_type)
@@ -141,13 +128,12 @@ class SchedulerService:
                 sent_count += 1
                 logger.info(f"Parser {parser_id}: ✅ Yuborildi ({sent_count}/{len(new_hrefs)}): {href}")
 
-                await asyncio.sleep(3)  # antispam
+                await asyncio.sleep(3) 
 
             except Exception as e:
                 logger.error(f"Parser {parser_id}: E'lon yuborishda xato {href}: {e}")
                 continue
 
-        # Bookmark – faqat log uchun, asosiy logika is_ad_parsed da
         try:
             if current_hrefs:
                 new_bookmark = current_hrefs[0]
@@ -155,7 +141,7 @@ class SchedulerService:
                 logger.info(f"Parser {parser_id}: Bookmark yangilandi: {new_bookmark}")
         except Exception as e:
             logger.error(f"Parser {parser_id}: Bookmark yangilashda xato: {e}")
-            
+
     async def send_to_channel(self, channel_id: str, details: Dict, site_type: str = 'olx'):
         try:
             message = self.parser_service.format_message(details, site_type)

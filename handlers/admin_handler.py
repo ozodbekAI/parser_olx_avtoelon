@@ -222,8 +222,7 @@ async def show_parsers(callback: CallbackQuery):
     if user_id not in Config.ADMIN_IDS:
         await callback.answer("❌ Admin huquqlari yo'q!", show_alert=True)
         return
-    
-    # Barcha adminlar uchun barcha parserlarni ko'rsatish
+
     parsers = await db.get_all_active_parsers()
     
     if not parsers:
@@ -238,7 +237,9 @@ async def show_parsers(callback: CallbackQuery):
             site = 'OLX' if p['site_type'] == 'olx' else 'Avtoelon'
             filter_info = f" | Filter: {p['filter_text']}" if p['filter_text'] else ''
             admin_who_added = f" | Qo'shgan: {p['admin_id']}"
-            text += f"🆔 {p['id']}: {p['url'][:30]}... ({site}){filter_info}{admin_who_added}\n"
+            channel_id = f" | Kanal: {p['channel_id']}"
+            text += f"🆔 {p['id']}: {p['url'][:30]}... ({site}){filter_info}{admin_who_added}\n{channel_id}\n"
+
         text += "\nParser tanlang yoki o'chirish uchun ❌ bosing:"
         
         await callback.message.edit_text(
@@ -263,7 +264,6 @@ async def delete_parser(callback: CallbackQuery):
     
     await callback.answer("✅ Parser o'chirildi!", show_alert=True)
     
-    # O'chirilgandan keyin barcha parserlarni qayta ko'rsatish
     parsers = await db.get_all_active_parsers()
     
     if not parsers:

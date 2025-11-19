@@ -203,14 +203,12 @@ class ParserService:
                             if user_name:
                                 details['seller_name'] = user_name.get_text(strip=True)
                         
-                        # Joylashuvni olish - YAXSHILANGAN
                         map_section = aside_div.find('div', {'data-testid': 'map-aside-section'})
                         if map_section:
                             print(map_section)
                             logger.info("Map section topildi")
                             location_found = False
                             
-                            # 1-usul: <p> teglardan olish
                             location_p = map_section.find('p', class_='css-9pna1a')
                             region_p = map_section.find('p', class_='css-3cz5o2')
                             
@@ -235,7 +233,6 @@ class ParserService:
                                     location_found = True
                                     logger.info(f"Location (usul 1): {details['location']}")
                             
-                            # 2-usul: <img> tegidagi alt atributidan olish
                             if not location_found:
                                 map_img = map_section.find('img', alt=True)
                                 logger.info(f"Map img: {map_img}")
@@ -247,7 +244,6 @@ class ParserService:
                                         location_found = True
                                         logger.info(f"Location (usul 2): {details['location']}")
                             
-                            # 3-usul: Barcha <p> teglardan izlash
                             if not location_found:
                                 all_p_tags = map_section.find_all('p')
                                 logger.info(f"Barcha <p> teglar soni: {len(all_p_tags)}")
@@ -266,7 +262,6 @@ class ParserService:
                         else:
                             logger.warning("Map section topilmadi!")
 
-                        # Agar hech qayerdan topilmasa, parametrlardan olish
                         if 'location' not in details or not details['location']:
                             logger.info("Location topilmadi, parametrlardan izlanmoqda")
                             params = details.get('params', {})
