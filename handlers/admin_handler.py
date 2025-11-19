@@ -278,7 +278,8 @@ async def delete_parser(callback: CallbackQuery):
             site = 'OLX' if p['site_type'] == 'olx' else 'Avtoelon'
             filter_info = f" | Filter: {p['filter_text']}" if p['filter_text'] else ''
             admin_who_added = f" | Qo'shgan: {p['admin_id']}"
-            text += f"🆔 {p['id']}: {p['url'][:30]}... ({site}){filter_info}{admin_who_added}\n"
+            channel_id = f" | Kanal: {p['channel_id']}"
+            text += f"🆔 {p['id']}: {p['url'][:30]}... ({site}){filter_info}{admin_who_added}\n{channel_id}\n"
         text += "\nParser tanlang yoki o'chirish uchun ❌ bosing:"
         
         await callback.message.edit_text(
